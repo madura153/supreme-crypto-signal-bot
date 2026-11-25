@@ -42,7 +42,7 @@ log = logging.getLogger("SUPREME-BOT")
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "SupremeCryptoGoldSignalBot/3.0"
+    "User-Agent": "SupremeCryptoGoldSignalBot/4.0"
 })
 
 
@@ -83,6 +83,25 @@ def save_state(state):
 
     except Exception as exc:
         log.warning("State save failed: %s", exc)
+
+
+def signal_fingerprint(message):
+    """Create a stable key so price changes do not resend the same candle signal."""
+    fields = {}
+
+    for line in message.splitlines():
+        for label in ("Market", "Symbol", "Direction", "Candle"):
+            marker = f"<b>{label}:</b>"
+
+            if marker in line:
+                fields[label] = line.split(marker, 1)[1].strip()
+
+    return "|".join([
+        fields.get("Market", ""),
+        fields.get("Symbol", ""),
+        fields.get("Direction", ""),
+        fields.get("Candle", "")
+    ])
 
 
 # ================= TELEGRAM =================
@@ -150,7 +169,7 @@ def exchange_symbol(symbol, provider):
 def get_symbols():
     symbols = []
 
-    # OKX FIRST
+    # OKX
     data = get_json(
         OKX_URL + "/api/v5/market/tickers",
         {"instType": "SWAP"}
@@ -218,10 +237,9 @@ def get_symbols():
                 if symbol.endswith("USDT"):
                     symbols.append(symbol)
 
-    # REMOVE DUPLICATES
     symbols = list(dict.fromkeys(symbols))
 
-    # ALWAYS INCLUDE XRP
+    # Always include XRP
     if symbols and symbols[0].endswith("-USDT-SWAP"):
         xrp = "XRP-USDT-SWAP"
     else:
@@ -239,14 +257,13 @@ def get_symbols():
             symbols = [xrp]
 
     log.info("Selected %s crypto symbols", len(symbols))
-
     return symbols
 
 
 # ================= CANDLE NORMALIZATION =================
 
 def normalize_ohlcv(rows):
-    if not rows:
+    if rows is None or len(rows) == 0:
         return None
 
     try:
@@ -262,13 +279,7 @@ def normalize_ohlcv(rows):
             ]
         )
 
-        for col in [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-        ]:
+        for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(
                 df[col],
                 errors="coerce"
@@ -280,7 +291,18 @@ def normalize_ohlcv(rows):
             utc=True
         )
 
-        df = df.dropna()
+        df = df.dropna(
+            subset=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
+        )
+
+        df["volume"] = df["volume"].fillna(0)
+
         df = df.sort_values("timestamp")
         df = df.drop_duplicates("timestamp")
         df = df.set_index("timestamp")
@@ -551,13 +573,7 @@ def gold_yahoo():
             "volume": quote.get("volume")
         })
 
-        for col in [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-        ]:
+        for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(
                 df[col],
                 errors="coerce"
@@ -610,7 +626,6 @@ def get_gold_data():
         return gold, "GC=F COMEX FUTURES PROXY"
 
     log.error("All gold data sources failed")
-
     return None, None
 
 
@@ -657,7 +672,20 @@ def add_indicators(df):
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    df["rsi"] = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+
+    # Handle zero-loss and flat-market cases
+    rsi = rsi.mask(
+        (avg_loss == 0) & (avg_gain > 0),
+        100
+    )
+
+    rsi = rsi.mask(
+        (avg_loss == 0) & (avg_gain == 0),
+        50
+    )
+
+    df["rsi"] = rsi
 
     # MACD
     ema12 = close.ewm(
@@ -709,7 +737,7 @@ def timeframe_score(df):
     try:
         df = add_indicators(df)
 
-        # Use last completed candle
+        # Last completed candle
         row = df.iloc[-2]
 
         required = [
@@ -800,6 +828,9 @@ def build_signal(
         if not np.isfinite(atr) or atr <= 0:
             return None
 
+        if not np.isfinite(rsi):
+            return None
+
         if direction == "BUY":
             stop = entry - (1.5 * atr)
             risk = entry - stop
@@ -819,6 +850,8 @@ def build_signal(
         else:
             return None
 
+        candle_time = row.name.isoformat()
+
         message = (
             "🚨 <b>SUPREME SIGNAL</b>\n"
             "━━━━━━━━━━━━━━━━\n"
@@ -833,6 +866,7 @@ def build_signal(
             f"<b>Target 3:</b> {target3:.6g}\n"
             f"<b>RSI:</b> {rsi:.2f}\n"
             f"<b>ATR:</b> {atr:.6g}\n"
+            f"<b>Candle:</b> {escape(candle_time)}\n"
         )
 
         if source:
@@ -885,7 +919,6 @@ def evaluate_crypto(symbol):
 
     if dir1 == "BUY":
         aligned_total = score1 + score15 + score5
-
     else:
         aligned_total = (
             (6 - score1)
@@ -919,11 +952,8 @@ def evaluate_crypto(symbol):
 def evaluate_gold():
     df1h, source = get_gold_data()
 
-    if df1h is None:
-        log.warning("Gold analysis skipped: no data")
-        return None
-
-    if len(df1h) < 220:
+    if df1h is None or len(df1h) < 220:
+        log.warning("Gold analysis skipped: insufficient data")
         return None
 
     try:
@@ -933,7 +963,9 @@ def evaluate_gold():
             "low": "min",
             "close": "last",
             "volume": "sum"
-        }).dropna()
+        }).dropna(
+            subset=["open", "high", "low", "close"]
+        )
 
         if len(df4h) < 220:
             log.warning(
@@ -953,7 +985,6 @@ def evaluate_gold():
 
         if dir4h == "BUY":
             aligned_total = score4h + score1h
-
         else:
             aligned_total = (
                 (6 - score4h)
@@ -987,6 +1018,24 @@ def evaluate_gold():
 
 # ================= MAIN SCAN =================
 
+def process_signal(state, key, message):
+    if not message:
+        return
+
+    fingerprint = signal_fingerprint(message)
+
+    if not fingerprint:
+        log.warning("Could not create signal fingerprint")
+        return
+
+    if state.get(key) == fingerprint:
+        log.info("Duplicate candle signal skipped: %s", key)
+        return
+
+    if send_telegram(message):
+        state[key] = fingerprint
+
+
 def run_scan():
     log.info("Starting Supreme Crypto + Gold scan")
 
@@ -997,11 +1046,11 @@ def run_scan():
         gold_message = evaluate_gold()
 
         if gold_message:
-            key = "GOLD"
-
-            if state.get(key) != gold_message:
-                if send_telegram(gold_message):
-                    state[key] = gold_message
+            process_signal(
+                state,
+                "GOLD",
+                gold_message
+            )
 
     except Exception:
         log.exception("Gold scan error")
@@ -1017,22 +1066,20 @@ def run_scan():
             try:
                 message = evaluate_crypto(symbol)
 
-                if not message:
-                    continue
-
-                key = "CRYPTO_" + symbol
-
-                if state.get(key) != message:
-                    if send_telegram(message):
-                        state[key] = message
-
-                time.sleep(1)
+                if message:
+                    process_signal(
+                        state,
+                        "CRYPTO_" + symbol,
+                        message
+                    )
 
             except Exception:
                 log.exception(
                     "Crypto analysis error: %s",
                     symbol
                 )
+
+            time.sleep(1)
 
     except Exception:
         log.exception("Crypto scan error")
