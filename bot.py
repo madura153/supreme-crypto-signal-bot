@@ -108,7 +108,6 @@ def send_telegram(message):
         )
 
         response.raise_for_status()
-
         result = response.json()
 
         if not result.get("ok"):
