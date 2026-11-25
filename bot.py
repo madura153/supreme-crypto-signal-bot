@@ -1,4 +1,3 @@
-
 """
 SUPREME CRYPTO + GOLD SIGNAL BOT
 Signal-only Telegram alerts.
@@ -11,6 +10,13 @@ import time
 import json
 import logging
 from html import escape
+from decimal import (
+    Decimal,
+    InvalidOperation,
+    ROUND_FLOOR,
+    ROUND_CEILING,
+    ROUND_HALF_UP
+)
 
 import requests
 import pandas as pd
@@ -32,6 +38,9 @@ BYBIT_URL = "https://api.bybit.com"
 BINANCE_URL = "https://fapi.binance.com"
 
 TIMEFRAMES = ["1h", "15m", "5m"]
+
+MAX_ENTRY_DRIFT_ATR = 0.75
+MAX_ENTRY_DRIFT_PCT = 0.005
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +64,7 @@ def get_json(url, params=None):
             params=params,
             timeout=25
         )
+
         response.raise_for_status()
         return response.json()
 
@@ -89,9 +99,8 @@ def save_state(state):
 
 def signal_fingerprint(message):
     """
-    Create a stable key from the new Telegram message format.
-    Prevents duplicate alerts for the same market, pair,
-    direction and completed candle.
+    Prevent duplicate alerts for the same market,
+    pair, direction and completed candle.
     """
 
     fields = {}
@@ -196,7 +205,6 @@ def exchange_symbol(symbol, provider):
 def get_trade_identity(market, symbol, source=""):
     """
     Separate the base coin and quote currency for Telegram display.
-    This does not change exchange symbols or trading analysis.
     """
 
     symbol = str(symbol).strip().upper()
@@ -488,44 +496,147 @@ def get_binance_klines(symbol, timeframe, limit=300):
     ])
 
 
-# ================= CRYPTO DATA FALLBACK =================
+# ================= LIVE PRICE + EXCHANGE TICK SIZE =================
 
-def get_crypto_klines(symbol, timeframe):
-    providers = [
-        get_okx_klines,
-        get_bybit_klines,
-        get_binance_klines
-    ]
+def get_live_price(symbol, provider):
+    """
+    Return live last price and quote timestamp
+    from the same exchange used for candle data.
+    """
 
-    for provider in providers:
-        try:
-            df = provider(symbol, timeframe)
+    market = exchange_symbol(symbol, provider)
 
-            if df is not None and len(df) >= 220:
-                log.info(
-                    "%s %s data received from %s",
-                    symbol,
-                    timeframe,
-                    provider.__name__
+    if provider == "OKX":
+        data = get_json(
+            OKX_URL + "/api/v5/market/ticker",
+            {"instId": market}
+        )
+
+        if data and data.get("code") == "0" and data.get("data"):
+            item = data["data"][0]
+
+            try:
+                return float(item["last"]), item.get("ts", "")
+            except (KeyError, TypeError, ValueError):
+                return None, ""
+
+    elif provider == "BYBIT":
+        data = get_json(
+            BYBIT_URL + "/v5/market/tickers",
+            {
+                "category": "linear",
+                "symbol": market
+            }
+        )
+
+        if data and data.get("retCode") == 0:
+            items = data.get("result", {}).get("list", [])
+
+            if items:
+                try:
+                    return (
+                        float(items[0]["lastPrice"]),
+                        str(data.get("time", ""))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return None, ""
+
+    elif provider == "BINANCE":
+        data = get_json(
+            BINANCE_URL + "/fapi/v1/ticker/price",
+            {"symbol": market}
+        )
+
+        if data and data.get("price") is not None:
+            try:
+                return (
+                    float(data["price"]),
+                    str(data.get("time", ""))
                 )
-                return df
+            except (TypeError, ValueError):
+                return None, ""
 
-        except Exception as exc:
-            log.warning(
-                "%s failed for %s %s: %s",
-                provider.__name__,
-                symbol,
-                timeframe,
-                exc
-            )
+    return None, ""
 
-    log.warning(
-        "No candle data available for %s %s",
-        symbol,
-        timeframe
-    )
+
+def get_price_tick_size(symbol, provider):
+    """
+    Read the instrument's actual price tick from exchange metadata.
+    """
+
+    market = exchange_symbol(symbol, provider)
+
+    if provider == "OKX":
+        data = get_json(
+            OKX_URL + "/api/v5/public/instruments",
+            {
+                "instType": "SWAP",
+                "instId": market
+            }
+        )
+
+        if data and data.get("code") == "0" and data.get("data"):
+            return data["data"][0].get("tickSz")
+
+    elif provider == "BYBIT":
+        data = get_json(
+            BYBIT_URL + "/v5/market/instruments-info",
+            {
+                "category": "linear",
+                "symbol": market
+            }
+        )
+
+        if data and data.get("retCode") == 0:
+            items = data.get("result", {}).get("list", [])
+
+            if items:
+                return items[0].get(
+                    "priceFilter", {}
+                ).get("tickSize")
+
+    elif provider == "BINANCE":
+        data = get_json(
+            BINANCE_URL + "/fapi/v1/exchangeInfo"
+        )
+
+        if data and isinstance(data.get("symbols"), list):
+            for item in data["symbols"]:
+                if item.get("symbol") == market:
+                    for filt in item.get("filters", []):
+                        if filt.get("filterType") == "PRICE_FILTER":
+                            return filt.get("tickSize")
 
     return None
+
+
+def round_to_tick(value, tick_size, rounding):
+    value_dec = Decimal(str(value))
+    tick_dec = Decimal(str(tick_size))
+
+    if tick_dec <= 0:
+        raise ValueError("Invalid exchange tick size")
+
+    return (
+        value_dec / tick_dec
+    ).to_integral_value(rounding=rounding) * tick_dec
+
+
+def format_tick_price(value, tick_size):
+    tick_dec = Decimal(str(tick_size))
+
+    rounded = round_to_tick(
+        value,
+        tick_dec,
+        ROUND_HALF_UP
+    )
+
+    decimals = max(
+        0,
+        -tick_dec.normalize().as_tuple().exponent
+    )
+
+    return f"{rounded:.{decimals}f}"
 
 
 # ================= TWELVE DATA GOLD =================
@@ -625,6 +736,7 @@ def gold_yahoo():
         result = results[0]
 
         timestamps = result.get("timestamp", [])
+
         quote_data = result.get(
             "indicators", {}
         ).get("quote", [])
@@ -882,7 +994,10 @@ def build_signal(
     direction,
     score,
     entry_df,
-    source=""
+    source="",
+    live_price=None,
+    quote_time="",
+    tick_size=None
 ):
     if entry_df is None or len(entry_df) < 220:
         return None
@@ -892,7 +1007,14 @@ def build_signal(
 
         row = df.iloc[-2]
 
-        entry = float(row["close"])
+        candle_close = float(row["close"])
+
+        entry = (
+            float(live_price)
+            if live_price is not None
+            else candle_close
+        )
+
         atr = float(row["atr"])
         rsi = float(row["rsi"])
 
@@ -904,6 +1026,30 @@ def build_signal(
 
         if not np.isfinite(rsi):
             return None
+
+        if market == "CRYPTO":
+            if not tick_size:
+                log.warning(
+                    "%s skipped: no verified exchange tick size",
+                    symbol
+                )
+                return None
+
+            drift = abs(entry - candle_close)
+
+            allowed_drift = min(
+                MAX_ENTRY_DRIFT_ATR * atr,
+                MAX_ENTRY_DRIFT_PCT * candle_close
+            )
+
+            if drift > allowed_drift:
+                log.info(
+                    "%s skipped: live quote drift %.8f exceeds %.8f",
+                    symbol,
+                    drift,
+                    allowed_drift
+                )
+                return None
 
         if direction == "BUY":
             stop = entry - (1.5 * atr)
@@ -924,6 +1070,122 @@ def build_signal(
         else:
             return None
 
+        if market == "CRYPTO":
+            try:
+                if direction == "BUY":
+                    stop = float(
+                        round_to_tick(
+                            stop,
+                            tick_size,
+                            ROUND_FLOOR
+                        )
+                    )
+
+                    target1 = float(
+                        round_to_tick(
+                            target1,
+                            tick_size,
+                            ROUND_CEILING
+                        )
+                    )
+
+                    target2 = float(
+                        round_to_tick(
+                            target2,
+                            tick_size,
+                            ROUND_CEILING
+                        )
+                    )
+
+                    target3 = float(
+                        round_to_tick(
+                            target3,
+                            tick_size,
+                            ROUND_CEILING
+                        )
+                    )
+
+                else:
+                    stop = float(
+                        round_to_tick(
+                            stop,
+                            tick_size,
+                            ROUND_CEILING
+                        )
+                    )
+
+                    target1 = float(
+                        round_to_tick(
+                            target1,
+                            tick_size,
+                            ROUND_FLOOR
+                        )
+                    )
+
+                    target2 = float(
+                        round_to_tick(
+                            target2,
+                            tick_size,
+                            ROUND_FLOOR
+                        )
+                    )
+
+                    target3 = float(
+                        round_to_tick(
+                            target3,
+                            tick_size,
+                            ROUND_FLOOR
+                        )
+                    )
+
+                entry = float(
+                    round_to_tick(
+                        entry,
+                        tick_size,
+                        ROUND_HALF_UP
+                    )
+                )
+
+            except (
+                InvalidOperation,
+                ValueError,
+                TypeError
+            ) as exc:
+                log.warning(
+                    "Price rounding failed for %s: %s",
+                    symbol,
+                    exc
+                )
+                return None
+
+            if direction == "BUY" and not (
+                stop < entry < target1 < target2 < target3
+            ):
+                log.warning(
+                    "%s skipped: invalid rounded BUY levels",
+                    symbol
+                )
+                return None
+
+            if direction == "SELL" and not (
+                stop > entry > target1 > target2 > target3
+            ):
+                log.warning(
+                    "%s skipped: invalid rounded SELL levels",
+                    symbol
+                )
+                return None
+
+        def price_text(value):
+            if market == "CRYPTO" and tick_size:
+                return format_tick_price(value, tick_size)
+
+            return (
+                f"{value:.2f}"
+                if market == "GOLD"
+                else f"{value:.6g}"
+            )
+
         candle_time = row.name.isoformat()
 
         identity = get_trade_identity(
@@ -939,6 +1201,7 @@ def build_signal(
                 f"💱 <b>TRADING PAIR:</b> {escape(identity['pair'])}\n"
                 f"📌 <b>INSTRUMENT:</b> {escape(identity['contract'])}\n"
             )
+
         else:
             identity_section = (
                 f"🪙 <b>COIN:</b> {escape(identity['asset'])}\n"
@@ -956,17 +1219,27 @@ def build_signal(
             f"<b>DIRECTION:</b> {'🟢 BUY' if direction == 'BUY' else '🔴 SELL'}\n"
             f"⭐ <b>SIGNAL SCORE:</b> {score}/10\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>ENTRY PRICE:</b> {entry:.6g}\n"
-            f"🛑 <b>STOP LOSS:</b> {stop:.6g}\n"
+            f"💰 <b>LIVE ENTRY PRICE:</b> {price_text(entry)}\n"
+            f"🛑 <b>STOP LOSS:</b> {price_text(stop)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "🎯 <b>TAKE PROFIT TARGETS</b>\n"
-            f"🥇 <b>TARGET 1:</b> {target1:.6g}\n"
-            f"🥈 <b>TARGET 2:</b> {target2:.6g}\n"
-            f"🥉 <b>TARGET 3:</b> {target3:.6g}\n"
+            f"🥇 <b>TARGET 1:</b> {price_text(target1)}\n"
+            f"🥈 <b>TARGET 2:</b> {price_text(target2)}\n"
+            f"🥉 <b>TARGET 3:</b> {price_text(target3)}\n"
             "━━━━━━━━━━━━━━━━━━\n"
             f"📈 <b>RSI:</b> {rsi:.2f}\n"
-            f"📉 <b>ATR:</b> {atr:.6g}\n"
-            f"🕒 <b>CANDLE:</b> {escape(candle_time)}\n"
+            f"📉 <b>ATR:</b> {atr:.8g}\n"
+            + (
+                f"📍 <b>5M CANDLE CLOSE:</b> {price_text(candle_close)}\n"
+                if market == "CRYPTO"
+                else ""
+            )
+            + (
+                f"🕘 <b>LIVE QUOTE TIME (ms):</b> {escape(str(quote_time))}\n"
+                if quote_time
+                else ""
+            )
+            + f"🕒 <b>CANDLE:</b> {escape(candle_time)}\n"
         )
 
         if source:
@@ -992,24 +1265,61 @@ def build_signal(
 # ================= CRYPTO ANALYSIS =================
 
 def evaluate_crypto(symbol):
-    dataframes = {}
+    # Use one exchange for every timeframe to avoid mixing price feeds.
+    providers = [
+        ("OKX", get_okx_klines),
+        ("BYBIT", get_bybit_klines),
+        ("BINANCE", get_binance_klines)
+    ]
 
-    for timeframe in TIMEFRAMES:
-        df = get_crypto_klines(symbol, timeframe)
+    selected_frames = None
+    selected_provider = None
 
-        if df is None:
-            log.info(
-                "Skipping %s: %s data unavailable",
-                symbol,
-                timeframe
-            )
-            return None
+    for provider_name, provider_func in providers:
+        frames = {}
 
-        dataframes[timeframe] = df
+        for timeframe in TIMEFRAMES:
+            try:
+                df = provider_func(symbol, timeframe)
 
-    score1, dir1 = timeframe_score(dataframes["1h"])
-    score15, dir15 = timeframe_score(dataframes["15m"])
-    score5, dir5 = timeframe_score(dataframes["5m"])
+            except Exception as exc:
+                log.warning(
+                    "%s failed for %s %s: %s",
+                    provider_name,
+                    symbol,
+                    timeframe,
+                    exc
+                )
+                df = None
+
+            if df is None or len(df) < 220:
+                break
+
+            frames[timeframe] = df
+
+        if len(frames) == len(TIMEFRAMES):
+            selected_frames = frames
+            selected_provider = provider_name
+            break
+
+    if selected_frames is None:
+        log.warning(
+            "No single exchange supplied all timeframes for %s",
+            symbol
+        )
+        return None
+
+    score1, dir1 = timeframe_score(
+        selected_frames["1h"]
+    )
+
+    score15, dir15 = timeframe_score(
+        selected_frames["15m"]
+    )
+
+    score5, dir5 = timeframe_score(
+        selected_frames["5m"]
+    )
 
     # All timeframes must agree
     if not (dir1 == dir15 == dir5):
@@ -1020,6 +1330,7 @@ def evaluate_crypto(symbol):
 
     if dir1 == "BUY":
         aligned_total = score1 + score15 + score5
+
     else:
         aligned_total = (
             (6 - score1)
@@ -1039,12 +1350,43 @@ def evaluate_crypto(symbol):
         )
         return None
 
+    # Get live quote and tick size from the same exchange
+    live_price, quote_time = get_live_price(
+        symbol,
+        selected_provider
+    )
+
+    tick_size = get_price_tick_size(
+        symbol,
+        selected_provider
+    )
+
+    if live_price is None or live_price <= 0:
+        log.warning(
+            "%s skipped: live quote unavailable on %s",
+            symbol,
+            selected_provider
+        )
+        return None
+
+    if not tick_size:
+        log.warning(
+            "%s skipped: exchange tick size unavailable on %s",
+            symbol,
+            selected_provider
+        )
+        return None
+
     return build_signal(
         "CRYPTO",
         symbol,
         dir1,
         total_score,
-        dataframes["5m"]
+        selected_frames["5m"],
+        f"{selected_provider} LIVE QUOTE",
+        live_price=live_price,
+        quote_time=quote_time,
+        tick_size=tick_size
     )
 
 
@@ -1054,7 +1396,9 @@ def evaluate_gold():
     df1h, source = get_gold_data()
 
     if df1h is None or len(df1h) < 220:
-        log.warning("Gold analysis skipped: insufficient data")
+        log.warning(
+            "Gold analysis skipped: insufficient data"
+        )
         return None
 
     try:
@@ -1086,6 +1430,7 @@ def evaluate_gold():
 
         if dir4h == "BUY":
             aligned_total = score4h + score1h
+
         else:
             aligned_total = (
                 (6 - score4h)
@@ -1133,7 +1478,10 @@ def process_signal(state, key, message):
         return
 
     if state.get(key) == fingerprint:
-        log.info("Duplicate candle signal skipped: %s", key)
+        log.info(
+            "Duplicate candle signal skipped: %s",
+            key
+        )
         return
 
     if send_telegram(message):
