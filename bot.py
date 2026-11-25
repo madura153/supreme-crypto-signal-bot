@@ -10,11 +10,11 @@ import os
 import time
 import json
 import logging
-from datetime import datetime, timezone
 
 import requests
 import pandas as pd
 import numpy as np
+
 
 # ================= CONFIG =================
 
@@ -56,6 +56,7 @@ def get_json(url, params=None):
         )
         response.raise_for_status()
         return response.json()
+
     except Exception as exc:
         log.warning("Request failed: %s", exc)
         return None
@@ -67,6 +68,7 @@ def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+
     except Exception:
         return {}
 
@@ -75,6 +77,7 @@ def save_state(state):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+
     except Exception as exc:
         log.warning("State save failed: %s", exc)
 
@@ -103,9 +106,11 @@ def send_telegram(message):
             },
             timeout=20
         )
+
         response.raise_for_status()
 
         result = response.json()
+
         if not result.get("ok"):
             log.error("Telegram error: %s", result)
             return False
@@ -125,8 +130,10 @@ def exchange_symbol(symbol, provider):
     if provider == "OKX":
         if symbol.endswith("-USDT-SWAP"):
             return symbol
+
         if symbol.endswith("USDT"):
             return symbol[:-4] + "-USDT-SWAP"
+
         return symbol
 
     if symbol.endswith("-USDT-SWAP"):
@@ -147,6 +154,7 @@ def get_symbols():
     if data and data.get("code") == "0":
         for item in data.get("data", []):
             symbol = item.get("instId", "")
+
             if symbol.endswith("-USDT-SWAP"):
                 symbols.append(symbol)
 
@@ -160,6 +168,7 @@ def get_symbols():
         if data and data.get("retCode") == 0:
             for item in data.get("result", {}).get("list", []):
                 symbol = item.get("symbol", "")
+
                 if symbol.endswith("USDT"):
                     symbols.append(symbol)
 
@@ -178,7 +187,7 @@ def get_symbols():
                 ):
                     symbols.append(item["symbol"])
 
-    # Add XRP even if it is not in the returned list
+    # Add XRP
     xrp = (
         "XRP-USDT-SWAP"
         if symbols and "-USDT-SWAP" in symbols[0]
@@ -188,8 +197,8 @@ def get_symbols():
     if xrp not in symbols:
         symbols.append(xrp)
 
-    # Keep XRP in the scan list
     symbols = symbols[:MAX_SYMBOLS]
+
     if xrp not in symbols:
         symbols[-1] = xrp
 
@@ -216,7 +225,10 @@ def normalize_ohlcv(rows):
         )
 
         for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
 
         df["timestamp"] = pd.to_datetime(
             pd.to_numeric(df["timestamp"]),
@@ -261,6 +273,7 @@ def get_okx_klines(symbol, timeframe, limit=300):
         return None
 
     rows = data.get("data", [])
+
     return normalize_ohlcv([
         row[:6] for row in rows
     ][::-1])
@@ -289,6 +302,7 @@ def get_bybit_klines(symbol, timeframe, limit=300):
         return None
 
     rows = data.get("result", {}).get("list", [])
+
     return normalize_ohlcv([
         row[:6] for row in rows
     ][::-1])
@@ -324,8 +338,10 @@ def get_crypto_klines(symbol, timeframe):
     for provider in providers:
         try:
             df = provider(symbol, timeframe)
+
             if df is not None and len(df) >= 220:
                 return df
+
         except Exception as exc:
             log.warning(
                 "%s %s failed: %s",
@@ -361,7 +377,10 @@ def gold_twelvedata():
         df = pd.DataFrame(data["values"])
 
         for col in ["open", "high", "low", "close"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
 
         if "volume" not in df.columns:
             df["volume"] = 0
@@ -380,7 +399,9 @@ def gold_twelvedata():
         df = df.sort_values("timestamp")
         df = df.set_index("timestamp")
 
-        return df[["open", "high", "low", "close", "volume"]]
+        return df[
+            ["open", "high", "low", "close", "volume"]
+        ]
 
     except Exception as exc:
         log.warning("Twelve Data conversion failed: %s", exc)
@@ -392,13 +413,14 @@ def gold_yahoo():
     data = get_json(
         "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
         {
-            "range": "60d",
+            "range": "2y",
             "interval": "1h"
         }
     )
 
     try:
         result = data["chart"]["result"][0]
+
         timestamps = result["timestamp"]
         quote = result["indicators"]["quote"][0]
 
@@ -416,9 +438,10 @@ def gold_yahoo():
         })
 
         df = df.dropna()
+        df = df.sort_values("timestamp")
         df = df.set_index("timestamp")
 
-        if len(df) < 220:
+        if len(df) < 880:
             return None
 
         return df
@@ -431,13 +454,15 @@ def gold_yahoo():
 def get_gold_data():
     gold = gold_twelvedata()
 
-    if gold is not None:
+    if gold is not None and len(gold) >= 880:
         return gold, "XAU/USD"
 
     gold = gold_yahoo()
 
-    if gold is not None:
+    if gold is not None and len(gold) >= 880:
         return gold, "GC=F COMEX FUTURES PROXY"
+
+    log.warning("Gold data unavailable or insufficient history")
 
     return None, None
 
@@ -449,9 +474,20 @@ def add_indicators(df):
 
     close = df["close"]
 
-    df["ema20"] = close.ewm(span=20, adjust=False).mean()
-    df["ema50"] = close.ewm(span=50, adjust=False).mean()
-    df["ema200"] = close.ewm(span=200, adjust=False).mean()
+    df["ema20"] = close.ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    df["ema50"] = close.ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    df["ema200"] = close.ewm(
+        span=200,
+        adjust=False
+    ).mean()
 
     delta = close.diff()
 
@@ -471,12 +507,21 @@ def add_indicators(df):
     ).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
+
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    ema12 = close.ewm(
+        span=12,
+        adjust=False
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26,
+        adjust=False
+    ).mean()
 
     df["macd"] = ema12 - ema26
+
     df["macd_signal"] = df["macd"].ewm(
         span=9,
         adjust=False
@@ -511,13 +556,15 @@ def timeframe_score(df):
 
     df = add_indicators(df)
 
-    # Ignore the currently forming candle
-    if len(df) < 3:
-        return 0, "NONE"
-
+    # Ignore currently forming candle
     row = df.iloc[-2]
 
-    if pd.isna(row["ema200"]) or pd.isna(row["rsi"]):
+    if (
+        pd.isna(row["ema200"])
+        or pd.isna(row["rsi"])
+        or pd.isna(row["macd"])
+        or pd.isna(row["macd_signal"])
+    ):
         return 0, "NONE"
 
     price = row["close"]
@@ -525,12 +572,16 @@ def timeframe_score(df):
 
     if price > row["ema20"]:
         score += 1
+
     if price > row["ema50"]:
         score += 1
+
     if price > row["ema200"]:
         score += 1
+
     if row["ema20"] > row["ema50"]:
         score += 1
+
     if row["macd"] > row["macd_signal"]:
         score += 1
 
@@ -540,13 +591,12 @@ def timeframe_score(df):
     if row["rsi"] > 70:
         score -= 1
 
-    if row["rsi"] < 30:
-        score += 0
-
     if score >= 4:
         direction = "BUY"
+
     elif score <= 2:
         direction = "SELL"
+
     else:
         direction = "NEUTRAL"
 
@@ -576,6 +626,7 @@ def build_signal(
     if direction == "BUY":
         stop = entry - (1.5 * atr)
         risk = entry - stop
+
         target1 = entry + (1.5 * risk)
         target2 = entry + (2.0 * risk)
         target3 = entry + (3.0 * risk)
@@ -583,18 +634,14 @@ def build_signal(
     else:
         stop = entry + (1.5 * atr)
         risk = stop - entry
+
         target1 = entry - (1.5 * risk)
         target2 = entry - (2.0 * risk)
-            if direction == "BUY":
-        aligned_total = score1 + score15 + score5
-    else:
-        aligned_total = (6 - score1) + (6 - score15) + (6 - score5)
+        target3 = entry - (3.0 * risk)
 
-    total_score = round((aligned_total / 18) * 10)
-
-    if total_score < MIN_SCORE:
-        log.info("%s %s skipped: score %s/10", symbol, direction, total_score)
-        return None
+    message = (
+        f"🚨 <b>{market} SIGNAL</b>\n"
+        f"<b>Symbol:</b> {symbol}\n"
         f"<b>Direction:</b> {direction}\n"
         f"<b>Score:</b> {score}/10\n"
         f"<b>Entry:</b> {entry:.6g}\n"
@@ -624,35 +671,58 @@ def evaluate_crypto(symbol):
     df15m = get_crypto_klines(symbol, "15m")
     df5m = get_crypto_klines(symbol, "5m")
 
-    if any(x is None for x in [df1h, df15m, df5m]):
-        log.info("Skipping %s: candle data unavailable", symbol)
+    if any(
+        df is None
+        for df in (df1h, df15m, df5m)
+    ):
+        log.info(
+            "Skipping %s: candle data unavailable",
+            symbol
+        )
         return None
 
     score1, dir1 = timeframe_score(df1h)
-        if direction == "BUY":
-        aligned_total = score4h + score1h
-    else:
-        aligned_total = (6 - score4h) + (6 - score1h)
+    score15, dir15 = timeframe_score(df15m)
+    score5, dir5 = timeframe_score(df5m)
 
-        if direction == "BUY":
-        aligned_total = score4h + score1h
-    else:
-        aligned_total = (6 - score4h) + (6 - score1h)
+    # All three timeframes must agree
+    if dir1 == dir15 == dir5 == "BUY":
+        direction = "BUY"
 
-    total_score = round((aligned_total / 12) * 10)
+        aligned_total = (
+            score1 + score15 + score5
+        )
 
-    if total_score < MIN_SCORE:
-        log.info("GOLD %s skipped: score %s/10", direction, total_score)
-        return None
+    elif dir1 == dir15 == dir5 == "SELL":
         direction = "SELL"
+
+        aligned_total = (
+            (6 - score1)
+            + (6 - score15)
+            + (6 - score5)
+        )
+
     else:
+        log.debug(
+            "%s: timeframe directions disagree (%s, %s, %s)",
+            symbol,
+            dir1,
+            dir15,
+            dir5
+        )
         return None
 
     total_score = round(
-        (score1 + score15 + score5) / 18 * 10
+        (aligned_total / 18) * 10
     )
 
     if total_score < MIN_SCORE:
+        log.info(
+            "%s %s skipped: score %s/10",
+            symbol,
+            direction,
+            total_score
+        )
         return None
 
     return build_signal(
@@ -681,25 +751,43 @@ def evaluate_gold():
         "volume": "sum"
     }).dropna()
 
-    if len(df1h) < 220 or len(df4h) < 220:
-        log.warning("Not enough gold candle history")
+    if len(df1h) < 880 or len(df4h) < 220:
+        log.warning(
+            "Not enough gold candle history (1h=%s, 4h=%s)",
+            len(df1h),
+            len(df4h)
+        )
         return None
 
     score4h, dir4h = timeframe_score(df4h)
     score1h, dir1h = timeframe_score(df1h)
 
-    if dir4h == "BUY" and dir1h == "BUY":
+    if dir4h == dir1h == "BUY":
         direction = "BUY"
-    elif dir4h == "SELL" and dir1h == "SELL":
+
+        aligned_total = score4h + score1h
+
+    elif dir4h == dir1h == "SELL":
         direction = "SELL"
+
+        aligned_total = (
+            (6 - score4h)
+            + (6 - score1h)
+        )
+
     else:
         return None
 
     total_score = round(
-        (score4h + score1h) / 12 * 10
+        (aligned_total / 12) * 10
     )
 
     if total_score < MIN_SCORE:
+        log.info(
+            "GOLD %s skipped: score %s/10",
+            direction,
+            total_score
+        )
         return None
 
     return build_signal(
@@ -725,6 +813,7 @@ def run_scan():
 
         if gold_message:
             key = "GOLD"
+
             if state.get(key) != gold_message:
                 if send_telegram(gold_message):
                     state[key] = gold_message
@@ -735,7 +824,11 @@ def run_scan():
     # CRYPTO
     try:
         symbols = get_symbols()
-        log.info("Symbols received: %s", len(symbols))
+
+        log.info(
+            "Symbols received: %s",
+            len(symbols)
+        )
 
         for symbol in symbols:
             try:
@@ -753,12 +846,16 @@ def run_scan():
                 time.sleep(1)
 
             except Exception:
-                log.exception("Crypto error: %s", symbol)
+                log.exception(
+                    "Crypto error: %s",
+                    symbol
+                )
 
     except Exception:
         log.exception("Crypto scan error")
 
     save_state(state)
+
     log.info("Scan completed")
 
 
@@ -768,7 +865,9 @@ def main():
     log.info("SUPREME CRYPTO + GOLD BOT STARTED")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.error("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
+        log.error(
+            "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
+        )
         return
 
     run_scan()
