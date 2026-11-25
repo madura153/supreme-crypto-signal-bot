@@ -585,12 +585,16 @@ def build_signal(
         risk = stop - entry
         target1 = entry - (1.5 * risk)
         target2 = entry - (2.0 * risk)
-        target3 = entry - (3.0 * risk)
+            if direction == "BUY":
+        aligned_total = score1 + score15 + score5
+    else:
+        aligned_total = (6 - score1) + (6 - score15) + (6 - score5)
 
-    message = (
-        f"<b>{market} SIGNAL</b>\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"<b>Symbol:</b> {symbol}\n"
+    total_score = round((aligned_total / 18) * 10)
+
+    if total_score < MIN_SCORE:
+        log.info("%s %s skipped: score %s/10", symbol, direction, total_score)
+        return None
         f"<b>Direction:</b> {direction}\n"
         f"<b>Score:</b> {score}/10\n"
         f"<b>Entry:</b> {entry:.6g}\n"
@@ -625,12 +629,21 @@ def evaluate_crypto(symbol):
         return None
 
     score1, dir1 = timeframe_score(df1h)
-    score15, dir15 = timeframe_score(df15m)
-    score5, dir5 = timeframe_score(df5m)
+        if direction == "BUY":
+        aligned_total = score4h + score1h
+    else:
+        aligned_total = (6 - score4h) + (6 - score1h)
 
-    if dir1 == "BUY" and dir15 == "BUY" and dir5 == "BUY":
-        direction = "BUY"
-    elif dir1 == "SELL" and dir15 == "SELL" and dir5 == "SELL":
+        if direction == "BUY":
+        aligned_total = score4h + score1h
+    else:
+        aligned_total = (6 - score4h) + (6 - score1h)
+
+    total_score = round((aligned_total / 12) * 10)
+
+    if total_score < MIN_SCORE:
+        log.info("GOLD %s skipped: score %s/10", direction, total_score)
+        return None
         direction = "SELL"
     else:
         return None
