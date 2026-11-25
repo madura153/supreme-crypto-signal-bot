@@ -85,23 +85,50 @@ def save_state(state):
         log.warning("State save failed: %s", exc)
 
 
+# ================= SIGNAL FINGERPRINT =================
+
 def signal_fingerprint(message):
-    """Create a stable key so price changes do not resend the same candle signal."""
+    """
+    Create a stable key from the new Telegram message format.
+    Prevents duplicate alerts for the same market, pair,
+    direction and completed candle.
+    """
+
     fields = {}
 
+    labels = (
+        "MARKET",
+        "TRADING PAIR",
+        "DIRECTION",
+        "CANDLE"
+    )
+
     for line in message.splitlines():
-        for label in ("Market", "Symbol", "Direction", "Candle"):
+        for label in labels:
             marker = f"<b>{label}:</b>"
 
             if marker in line:
-                fields[label] = line.split(marker, 1)[1].strip()
+                fields[label] = line.split(
+                    marker, 1
+                )[1].strip()
 
-    return "|".join([
-        fields.get("Market", ""),
-        fields.get("Symbol", ""),
-        fields.get("Direction", ""),
-        fields.get("Candle", "")
-    ])
+    required = (
+        "MARKET",
+        "TRADING PAIR",
+        "DIRECTION",
+        "CANDLE"
+    )
+
+    if not all(fields.get(label) for label in required):
+        log.warning(
+            "Could not create signal fingerprint. "
+            "Required message fields are missing."
+        )
+        return ""
+
+    return "|".join(
+        fields[label] for label in required
+    )
 
 
 # ================= TELEGRAM =================
@@ -169,7 +196,7 @@ def exchange_symbol(symbol, provider):
 def get_trade_identity(market, symbol, source=""):
     """
     Separate the base coin and quote currency for Telegram display.
-    This does not change the exchange symbol or trading analysis.
+    This does not change exchange symbols or trading analysis.
     """
 
     symbol = str(symbol).strip().upper()
@@ -899,7 +926,6 @@ def build_signal(
 
         candle_time = row.name.isoformat()
 
-        # Get display-only coin and pair details
         identity = get_trade_identity(
             market,
             symbol,
@@ -1100,7 +1126,10 @@ def process_signal(state, key, message):
     fingerprint = signal_fingerprint(message)
 
     if not fingerprint:
-        log.warning("Could not create signal fingerprint")
+        log.warning(
+            "Signal not processed because fingerprint is invalid: %s",
+            key
+        )
         return
 
     if state.get(key) == fingerprint:
