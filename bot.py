@@ -164,6 +164,53 @@ def exchange_symbol(symbol, provider):
     return symbol
 
 
+# ================= TRADING PAIR DISPLAY =================
+
+def get_trade_identity(market, symbol, source=""):
+    """
+    Separate the base coin and quote currency for Telegram display.
+    This does not change the exchange symbol or trading analysis.
+    """
+
+    symbol = str(symbol).strip().upper()
+    market = str(market).strip().upper()
+
+    if market == "GOLD":
+        return {
+            "asset": "GOLD (XAU)",
+            "quote": "USD",
+            "pair": "XAU / USD",
+            "contract": (
+                "GOLD FUTURES PROXY"
+                if "GC=F" in str(source).upper()
+                else "GOLD SPOT DATA"
+            )
+        }
+
+    if symbol.endswith("-USDT-SWAP"):
+        base = symbol[:-10]
+        quote = "USDT"
+
+    elif symbol.endswith("USDT"):
+        base = symbol[:-4]
+        quote = "USDT"
+
+    else:
+        base = symbol
+        quote = "UNKNOWN"
+
+    return {
+        "asset": base,
+        "quote": quote,
+        "pair": f"{base} / {quote}",
+        "contract": (
+            "USDT PERPETUAL SWAP"
+            if quote == "USDT"
+            else "EXCHANGE CONTRACT"
+        )
+    }
+
+
 # ================= SYMBOL LIST =================
 
 def get_symbols():
@@ -852,33 +899,61 @@ def build_signal(
 
         candle_time = row.name.isoformat()
 
+        # Get display-only coin and pair details
+        identity = get_trade_identity(
+            market,
+            symbol,
+            source
+        )
+
+        if market == "GOLD":
+            identity_section = (
+                f"🪙 <b>ASSET:</b> {escape(identity['asset'])}\n"
+                f"💵 <b>QUOTE CURRENCY:</b> {escape(identity['quote'])}\n"
+                f"💱 <b>TRADING PAIR:</b> {escape(identity['pair'])}\n"
+                f"📌 <b>INSTRUMENT:</b> {escape(identity['contract'])}\n"
+            )
+        else:
+            identity_section = (
+                f"🪙 <b>COIN:</b> {escape(identity['asset'])}\n"
+                f"💵 <b>QUOTE CURRENCY:</b> {escape(identity['quote'])}\n"
+                f"💱 <b>TRADING PAIR:</b> {escape(identity['pair'])}\n"
+                f"📌 <b>CONTRACT:</b> {escape(identity['contract'])}\n"
+            )
+
         message = (
-            "🚨 <b>SUPREME SIGNAL</b>\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"<b>Market:</b> {escape(str(market))}\n"
-            f"<b>Symbol:</b> {escape(str(symbol))}\n"
-            f"<b>Direction:</b> {direction}\n"
-            f"<b>Score:</b> {score}/10\n"
-            f"<b>Entry:</b> {entry:.6g}\n"
-            f"<b>Stop Loss:</b> {stop:.6g}\n"
-            f"<b>Target 1:</b> {target1:.6g}\n"
-            f"<b>Target 2:</b> {target2:.6g}\n"
-            f"<b>Target 3:</b> {target3:.6g}\n"
-            f"<b>RSI:</b> {rsi:.2f}\n"
-            f"<b>ATR:</b> {atr:.6g}\n"
-            f"<b>Candle:</b> {escape(candle_time)}\n"
+            "🚨 <b>SUPREME SIGNAL</b> 🚨\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"{identity_section}"
+            f"📊 <b>MARKET:</b> {escape(str(market))}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"<b>DIRECTION:</b> {'🟢 BUY' if direction == 'BUY' else '🔴 SELL'}\n"
+            f"⭐ <b>SIGNAL SCORE:</b> {score}/10\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>ENTRY PRICE:</b> {entry:.6g}\n"
+            f"🛑 <b>STOP LOSS:</b> {stop:.6g}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🎯 <b>TAKE PROFIT TARGETS</b>\n"
+            f"🥇 <b>TARGET 1:</b> {target1:.6g}\n"
+            f"🥈 <b>TARGET 2:</b> {target2:.6g}\n"
+            f"🥉 <b>TARGET 3:</b> {target3:.6g}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"📈 <b>RSI:</b> {rsi:.2f}\n"
+            f"📉 <b>ATR:</b> {atr:.6g}\n"
+            f"🕒 <b>CANDLE:</b> {escape(candle_time)}\n"
         )
 
         if source:
             message += (
-                f"<b>Data Source:</b> "
+                f"📡 <b>DATA SOURCE:</b> "
                 f"{escape(str(source))}\n"
             )
 
         message += (
-            "━━━━━━━━━━━━━━━━\n"
-            "<i>Signal only. Not financial advice. "
-            "No guaranteed profit.</i>"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Signal only. Not financial advice.</i>\n"
+            "❌ <i>No automatic trading or order placement.</i>\n"
+            "⚠️ <i>No guaranteed profit.</i>"
         )
 
         return message
