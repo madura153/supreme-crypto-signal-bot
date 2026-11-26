@@ -1,6 +1,7 @@
+
 """
 SUPREME CRYPTO + GOLD SIGNAL BOT
-Version: 5.0
+Version: 5.1
 Signal-only Telegram alerts.
 NO automatic trading or order placement.
 Python 3.11+
@@ -22,7 +23,7 @@ import numpy as np
 # CONFIGURATION
 # =====================================================
 
-BOT_VERSION = "5.0"
+BOT_VERSION = "5.1"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -59,7 +60,7 @@ log = logging.getLogger("SUPREME-BOT")
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "SupremeSignalBot/5.0"
+    "User-Agent": "SupremeSignalBot/5.1"
 })
 
 
@@ -723,15 +724,18 @@ def analyze_frames(frames):
     if direction not in ["BUY", "SELL"]:
         return None
 
+    # FIXED: Correct score key for BUY and SELL.
+    score_key = "bullish" if direction == "BUY" else "bearish"
+
     # Stronger minimum requirement on higher timeframes.
-    if results["1d"][direction.lower() if direction == "BUY" else "bearish"] < 4:
+    if results["1d"][score_key] < 4:
         return None
 
-    if results["1h"][direction.lower() if direction == "BUY" else "bearish"] < 4:
+    if results["1h"][score_key] < 4:
         return None
 
     total = sum(
-        results[tf]["bullish" if direction == "BUY" else "bearish"]
+        results[tf][score_key]
         for tf in ["1d", "1h", "15m", "5m"]
     )
 
@@ -829,12 +833,9 @@ def make_message(
 
     current_time = now_slt()
 
-    # Estimated duration based on the target volatility.
-    atr = results["5m"]["atr"]
-    expected_minutes = max(
-        15,
-        min(360, int((levels["risk"] / atr) * 30))
-    )
+    # Fixed review estimate.
+    # This is not a guaranteed time for a target or stop-loss.
+    expected_minutes = 45
 
     expected_close = current_time + timedelta(
         minutes=expected_minutes
@@ -867,11 +868,11 @@ def make_message(
         "━━━━━━━━━━━━━━━━━━\n"
         f"⭐ <b>TECHNICAL SCORE:</b> {confidence}/100\n"
         f"📈 <b>RSI (5M):</b> {results['5m']['rsi']:.2f}\n"
-        f"📉 <b>ATR (5M):</b> {atr:.6g}\n"
+        f"📉 <b>ATR (5M):</b> {results['5m']['atr']:.6g}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🕘 <b>SIGNAL TIME (SLT):</b> {current_time:%Y-%m-%d %H:%M:%S}\n"
-        f"⏱ <b>ESTIMATED DURATION:</b> {expected_minutes} minutes\n"
-        f"🕒 <b>ESTIMATED REVIEW TIME:</b> {expected_close:%Y-%m-%d %H:%M:%S} SLT\n"
+        f"⏱ <b>ESTIMATED REVIEW INTERVAL:</b> {expected_minutes} minutes\n"
+        f"🕒 <b>REVIEW TIME:</b> {expected_close:%Y-%m-%d %H:%M:%S} SLT\n"
         f"🕯 <b>LAST COMPLETED 5M CANDLE:</b> {candle_time}\n"
         f"📡 <b>DATA SOURCE:</b> {source}\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -882,7 +883,7 @@ def make_message(
         f"5M: {results['5m']['direction']}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "⚠️ <i>Technical score is not a win probability.</i>\n"
-        "⚠️ <i>Estimated time is not a guaranteed closing time.</i>\n"
+        "⚠️ <i>Review time is not a guaranteed closing time.</i>\n"
         "❌ <i>Signal only. No automatic trading.</i>\n"
         "⚠️ <i>No guaranteed profit.</i>"
     )
@@ -1010,8 +1011,6 @@ def evaluate_gold():
 def process_signal(state, key, message):
     if not message:
         return
-
-    fingerprint = message
 
     # Use the candle and direction portion to avoid repeats.
     lines = message.splitlines()
