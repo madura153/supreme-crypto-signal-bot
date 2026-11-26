@@ -103,10 +103,28 @@ def get_json(url, params=None):
             params=params,
             timeout=25
         )
-        response.raise_for_status()
-        return response.json()
-    except Exception as exc:
-        log.warning("GET failed: %s | %s", url, exc)
+
+        if not response.ok:
+            log.warning(
+                "GET HTTP %s | %s | response=%s",
+                response.status_code,
+                url,
+                response.text[:500]
+            )
+            return None
+
+        try:
+            return response.json()
+        except ValueError:
+            log.warning(
+                "GET returned non-JSON response | %s | response=%s",
+                url,
+                response.text[:500]
+            )
+            return None
+
+    except requests.RequestException as exc:
+        log.warning("GET request failed: %s | %s", url, exc)
         return None
 
 
@@ -117,10 +135,27 @@ def post_json(url, data):
             json=data,
             timeout=25
         )
-        response.raise_for_status()
-        return response.json()
-    except Exception as exc:
-        log.warning("POST failed: %s", exc)
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {
+                "ok": False,
+                "http_status": response.status_code,
+                "description": response.text[:500]
+            }
+
+        if not response.ok:
+            log.error(
+                "POST HTTP %s | response=%s",
+                response.status_code,
+                str(payload)[:700]
+            )
+
+        return payload
+
+    except requests.RequestException as exc:
+        log.error("POST request failed: %s", exc)
         return None
 
 
@@ -156,11 +191,14 @@ def save_state(state):
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.error("Telegram credentials missing")
+        log.error(
+            "Telegram credentials missing: "
+            "check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID GitHub Secrets"
+        )
         return False
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -171,11 +209,22 @@ def send_telegram(message):
         "disable_web_page_preview": True
     })
 
-    if result and result.get("ok"):
-        log.info("Telegram message sent")
+    if isinstance(result, dict) and result.get("ok") is True:
+        log.info("Telegram message sent successfully")
         return True
 
-    log.error("Telegram message failed: %s", result)
+    if isinstance(result, dict):
+        log.error(
+            "Telegram delivery rejected: error_code=%s | description=%s",
+            result.get("error_code", result.get("http_status", "unknown")),
+            result.get("description", result)
+        )
+    else:
+        log.error(
+            "Telegram delivery failed: no valid response received. "
+            "Check network access, bot token, and Chat ID."
+        )
+
     return False
 
 
@@ -717,11 +766,19 @@ def analyze_frames(frames):
     ]
 
     if not all(d == directions[0] for d in directions):
+        log.info(
+            "Signal rejected: timeframe directions are not aligned: %s",
+            directions
+        )
         return None
 
     direction = directions[0]
 
     if direction not in ["BUY", "SELL"]:
+        log.info(
+            "Signal rejected: no confirmed BUY/SELL setup; directions=%s",
+            directions
+        )
         return None
 
     # FIXED: Correct score key for BUY and SELL.
@@ -729,9 +786,17 @@ def analyze_frames(frames):
 
     # Stronger minimum requirement on higher timeframes.
     if results["1d"][score_key] < 4:
+        log.info(
+            "Signal rejected: 1D %s score too low (%s)",
+            direction, results["1d"][score_key]
+        )
         return None
 
     if results["1h"][score_key] < 4:
+        log.info(
+            "Signal rejected: 1H %s score too low (%s)",
+            direction, results["1h"][score_key]
+        )
         return None
 
     total = sum(
@@ -743,8 +808,16 @@ def analyze_frames(frames):
 
     # Confidence is a technical score, not a probability of profit.
     if confidence < 70:
+        log.info(
+            "Signal rejected: technical score %s/100 is below minimum 70/100",
+            confidence
+        )
         return None
 
+    log.info(
+        "Signal setup confirmed: %s | technical score=%s/100",
+        direction, confidence
+    )
     return direction, confidence, results
 
 
@@ -1069,7 +1142,11 @@ def run_scan():
 
     save_state(state)
 
-    log.info("SUPREME BOT SCAN COMPLETED")
+    log.info(
+        "SUPREME BOT SCAN COMPLETED. "
+        "If no Telegram alert was sent, check the rejection/data messages above; "
+        "a successful scan does not guarantee that a valid signal exists."
+    )
 
 
 # =====================================================
@@ -1080,7 +1157,29 @@ def main():
     log.info("SUPREME SIGNAL BOT %s STARTED", BOT_VERSION)
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.error("Telegram secrets are missing")
+        log.error(
+            "Telegram secrets are missing. Add TELEGRAM_BOT_TOKEN "
+            "and TELEGRAM_CHAT_ID under GitHub Settings > Secrets and variables > Actions."
+        )
+        raise SystemExit(1)
+
+    test_mode = os.getenv("TELEGRAM_TEST_MODE", "false").strip().lower()
+    if test_mode in ("1", "true", "yes", "on"):
+        test_message = (
+            "✅ <b>SUPREME BOT TELEGRAM TEST</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Telegram connection is working.\n"
+            "Bot token and Chat ID were accepted by Telegram.\n"
+            f"🕘 Test time (SLT): {now_slt():%Y-%m-%d %H:%M:%S}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "This is a connection test, not a trading signal."
+        )
+
+        if not send_telegram(test_message):
+            log.error("Telegram test failed. See the error details above.")
+            raise SystemExit(1)
+
+        log.info("Telegram test completed. Market scan was skipped.")
         return
 
     run_scan()
