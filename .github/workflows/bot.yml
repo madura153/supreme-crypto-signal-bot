@@ -35,6 +35,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas numpy
 
+      - name: Check Telegram Secrets
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN is missing"
+            exit 1
+          fi
+
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::error::TELEGRAM_CHAT_ID is missing"
+            exit 1
+          fi
+
+          if [ -z "$TWELVEDATA_API_KEY" ]; then
+            echo "::warning::TWELVEDATA_API_KEY is missing. Gold data may be unavailable."
+          fi
+
+          echo "Telegram credentials check completed."
+
       - name: Run Supreme Signal Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
